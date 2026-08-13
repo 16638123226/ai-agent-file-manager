@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent 文件管家</title>
+    <style>
+        :root {
+            --bg-primary: #0d0d1a;
+            --bg-secondary: #151530;
+            --bg-sidebar: #101020;
+            --bg-input: #1a1a35;
+            --bg-tool: #0a1a10;
+            --bg-user: #0f3460;
+            --bg-agent: #151538;
+            --text-primary: #e0e0f0;
+            --text-secondary: #8888aa;
+            --text-tool: #7ac97a;
+            --accent: #4a7dfc;
+            --accent-hover: #3a6df0;
+            --danger: #e94560;
+            --border: #252545;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* 侧边栏 */
+        .sidebar {
+            width: 260px;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            transition: transform 0.3s;
+        }
+        .sidebar-header {
+            padding: 20px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .sidebar-header h2 {
+            font-size: 16px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .new-chat-btn {
+            width: 100%;
+            padding: 10px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .new-chat-btn:hover { background: var(--accent-hover); }
+
+        .sidebar-section {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+        .sidebar-section h3 {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+        .memory-item {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 8px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .memory-item:hover { border-color: var(--accent); }
+        .memory-item .source {
+            font-size: 11px;
+            color: var(--accent);
+            margin-bottom: 4px;
+        }
+        .memory-item .preview {
+            color: var(--text-secondary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+
+        /* 主区域 */
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .chat-header {
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border);
+            font-size: 15px;
+            font-weight: 600;
+            background: var(--bg-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: #4ade80;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* 聊天区 */
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .message {
+            max-width: 85%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.7;
+            font-size: 14px;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message.user {
+            align-self: flex-end;
+            background: var(--bg-user);
+            border-bottom-right-radius: 4px;
+        }
+        .message.agent {
+            align-self: flex-start;
+            background: var(--bg-agent);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 4px;
+            white-space: pre-wrap;
+        }
+        .message.error {
+            align-self: center;
+            background: #2a1015;
+            border: 1px solid #4a2025;
+            color: #f88;
+            font-size: 13px;
+        }
+
+        /* 思考过程折叠 */
+        .thinking-container {
+            align-self: flex-start;
+            max-width: 85%;
+            width: 100%;
+        }
+        .thinking-toggle {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 13px;
+            padding: 4px 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: color 0.2s;
+        }
+        .thinking-toggle:hover { color: var(--text-primary); }
+        .thinking-toggle .arrow {
+            transition: transform 0.2s;
+            font-size: 10px;
+        }
+        .thinking-toggle.open .arrow { transform: rotate(90deg); }
+        .thinking-content {
+            display: none;
+            padding: 8px 0 8px 16px;
+            border-left: 2px solid var(--border);
+            margin-left: 6px;
+        }
+        .thinking-content.show { display: block; }
+        .tool-call {
+            background: var(--bg-tool);
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            font-size: 12px;
+            color: var(--text-tool);
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .tool-result {
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        /* 输入区 */
+        .chat-input-area {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-secondary);
+            display: flex;
+            gap: 12px;
+        }
+        .chat-input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .chat-input-area input:focus { border-color: var(--accent); }
+        .chat-input-area input::placeholder { color: var(--text-secondary); }
+        .chat-input-area button {
+            padding: 12px 24px;
+            border-radius: 24px;
+            border: none;
+            background: var(--accent);
+            color: #fff;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+        .chat-input-area button:hover { background: var(--accent-hover); }
+        .chat-input-area button:disabled {
+            background: #333355;
+            cursor: not-allowed;
+        }
+
+        /* 统计条 */
+        .stats-bar {
+            padding: 8px 24px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 16px;
+            flex-shrink: 0;
+        }
+
+        /* 加载动画 */
+        .loading-dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+        .loading-dots span {
+            width: 6px;
+            height: 6px;
+            background: var(--text-secondary);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite;
+        }
+        .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes bounce {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-6px); }
+        }
+
+        /* 移动端 */
+        @media (max-width: 768px) {
+            .sidebar {
+                position: absolute;
+                left: 0;
+                top: 0;
+                bottom: 0;
+                z-index: 100;
+                transform: translateX(-100%);
+            }
+            .sidebar.show { transform: translateX(0); }
+            .chat-messages { padding: 16px; }
+            .chat-input-area { padding: 12px 16px; }
+            .message { max-width: 95%; }
+        }
+
+        /* 滚动条美化 */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+    </style>
+</head>
+<body>
+    <!-- 侧边栏 -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>🤖 Agent 文件管家</h2>
+            <button class="new-chat-btn" onclick="newChat()">+ 新对话</button>
+        </div>
+        <div class="sidebar-section">
+            <h3>📌 Agent 记忆</h3>
+            <div id="memoryList">
+                <div style="color: var(--text-secondary); font-size: 13px; text-align: center; padding: 20px 0;">
+                    暂无记忆条目
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主区域 -->
+    <div class="main">
+        <div class="chat-header">
+            <span class="status-dot"></span>
+            AI Agent · 在线
+            <span style="margin-left: auto; font-size: 12px; color: var(--text-secondary);">文件操作 · 搜索 · 天气 · 记忆</span>
+        </div>
+
+        <div class="chat-messages" id="messages"></div>
+
+        <div class="stats-bar" id="statsBar">
+            <span>准备就绪</span>
+        </div>
+
+        <div class="chat-input-area">
+            <input type="text" id="userInput" placeholder="输入指令，例如：帮我记住... / 搜索... / 读文件..."
+                   onkeydown="if(event.key==='Enter') sendMessage()">
+            <button id="sendBtn" onclick="sendMessage()">发送</button>
+        </div>
+    </div>
+
+    <script>
+        const messagesDiv = document.getElementById('messages');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statsBar = document.getElementById('statsBar');
+        const memoryList = document.getElementById('memoryList');
+
+        // 当前对话的思考过程容器
+        let currentThinkingContainer = null;
+        let currentThinkingContent = null;
+
+        function addMessage(content, className) {
+            const div = document.createElement('div');
+            div.className = `message ${className}`;
+            div.textContent = content;
+            messagesDiv.appendChild(div);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return div;
+        }
+
+        function createThinkingContainer() {
+            const container = document.createElement('div');
+            container.className = 'thinking-container';
+
+            const toggle = document.createElement('button');
+            toggle.className = 'thinking-toggle';
+            toggle.innerHTML = '<span class="arrow">▶</span> 思考过程';
+            toggle.onclick = () => {
+                toggle.classList.toggle('open');
+                content.classList.toggle('show');
+                if (toggle.classList.contains('open')) {
+                    toggle.querySelector('.arrow').textContent = '▼';
+                } else {
+                    toggle.querySelector('.arrow').textContent = '▶';
+                }
+            };
+
+            const content = document.createElement('div');
+            content.className = 'thinking-content';
+
+            container.appendChild(toggle);
+            container.appendChild(content);
+            messagesDiv.appendChild(container);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            return { container, toggle, content };
+        }
+
+        function addThinkingEntry(content, type) {
+            if (!currentThinkingContainer) {
+                const created = createThinkingContainer();
+                currentThinkingContainer = created.container;
+                currentThinkingContent = created.content;
+            }
+            const entry = document.createElement('div');
+            entry.className = type === 'tool_call' ? 'tool-call' : 'tool-result';
+            entry.textContent = content;
+            currentThinkingContent.appendChild(entry);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function resetThinking() {
+            currentThinkingContainer = null;
+            currentThinkingContent = null;
+        }
+
+                function updateMemoryPanel() {
+            fetch('/memories')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.length === 0) {
+                        memoryList.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px; text-align: center; padding: 20px 0;">暂无记忆条目</div>';
+                    } else {
+                        memoryList.innerHTML = data.map((m, index) => `
+                            <div class="memory-item" data-index="${index}">
+                                <div class="source">${m.source || '记忆'}</div>
+                                <div class="preview">${m.user || m.content || ''}</div>
+                            </div>
+                        `).join('');
+                        
+                        // 给每个记忆条目加点击事件
+                        document.querySelectorAll('.memory-item').forEach(item => {
+                            item.addEventListener('click', () => {
+                                const idx = parseInt(item.dataset.index);
+                                const mem = data[idx];
+                                const fullContent = `用户问题：${mem.user || '无'}\n\nAgent回答：${mem.agent_summary || mem.content || '无'}`;
+                                alert(fullContent);
+                            });
+                        });
+                    }
+                })
+                .catch(() => {});
+        }
+
+        function newChat() {
+            messagesDiv.innerHTML = '';
+            statsBar.textContent = '新对话已开始';
+            resetThinking();
+            userInput.focus();
+        }
+
+        async function sendMessage() {
+            const message = userInput.value.trim();
+            if (!message) return;
+
+            addMessage(`🧑 你：${message}`, 'user');
+            userInput.value = '';
+            sendBtn.disabled = true;
+            userInput.disabled = true;
+            resetThinking();
+            statsBar.textContent = 'Agent 思考中...';
+
+            let finalDiv = null;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+
+                            if (data.type === 'tool_call') {
+                                addThinkingEntry(`🔧 调用工具：${data.name}\n参数：${JSON.stringify(data.args, null, 2)}`, 'tool_call');
+                            } else if (data.type === 'tool_result') {
+                                addThinkingEntry(`📋 工具返回：\n${data.content}`, 'tool_result');
+                            } else if (data.type === 'stream') {
+                                if (!finalDiv) {
+                                    finalDiv = addMessage('🤖 Agent：', 'agent');
+                                }
+                                finalDiv.textContent += data.content;
+                                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                            } else if (data.type === 'done') {
+                                statsBar.textContent = `📊 共执行 ${data.steps} 步 · 消耗 ${data.tokens} Token`;
+                            } else if (data.type === 'error') {
+                                addMessage(`⚠️ ${data.content}`, 'error');
+                                statsBar.textContent = '发生错误';
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                addMessage(`⚠️ 连接错误：${err.message}`, 'error');
+                statsBar.textContent = '连接错误';
+            }
+
+            sendBtn.disabled = false;
+            userInput.disabled = false;
+            userInput.focus();
+            resetThinking();
+            updateMemoryPanel();
+        }
+
+        // 初始加载记忆面板
+        updateMemoryPanel();
+    </script>
+</body>
+</html>
