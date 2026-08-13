@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 # ========== RAG 知识库 ==========
 import chromadb
 from chromadb.config import Settings
@@ -46,10 +49,9 @@ app.add_middleware(
 
 # 初始化 OpenAI 客户端（用你的 DeepSeek Key）
 client = openai.OpenAI(
-    api_key="sk-839bdb30f68f42508aac170f3ce709e7",  # ← 改成你的 Key
+    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
     base_url="https://api.deepseek.com/v1"
 )
-
 # ========== 记忆管理 ==========
 import time
 MEMORY_FILE = "memory.json"
