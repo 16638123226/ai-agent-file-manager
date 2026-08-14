@@ -5,9 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, Annotated
-import operator
 from dotenv import load_dotenv
 import os
 import json
@@ -27,6 +24,14 @@ app.add_middleware(
 
 # ========== 初始化 LLM ==========
 api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+print(f"DEBUG: API Key 长度 = {len(api_key)}")  # 打印长度，不打印 Key 本身
+if not api_key:
+    # 如果环境变量没有，尝试从 .env 读
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    print(f"DEBUG: 从 .env 读取后，API Key 长度 = {len(api_key)}")
+
 llm = ChatOpenAI(
     model="deepseek-chat",
     api_key=api_key,
@@ -143,46 +148,73 @@ def add_document(content: str, source: str = "未标注") -> str:
 
 @tool
 def query_knowledge(query: str) -> str:
-    """从知识库检索相关内容。当用户问'之前存的资料'、'文档里写了什么'时，必须先调这个工具。"""
+    """从知识库检索与问题最相关的内容。当用户问'之前存的资料'、'文档里写了什么'时，必须先调这个工具，不要重新读文件。"""
     try:
+        # 第一步：粗检索，返回 5 个候选片段
         q_emb = get_embedding_model().encode(query).tolist()
-        results = collection.query(query_embeddings=[q_emb], n_results=5)
+        results = collection.query(
+            query_embeddings=[q_emb],
+            n_results=5  # 先取 5 个候选
+        )
+        
         if not results or not results["documents"] or not results["documents"][0]:
             return "知识库中没有相关的内容。"
         
         candidates = []
         for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-            candidates.append({"doc": doc, "source": meta.get("source", "未知")})
+            candidates.append({
+                "doc": doc,
+                "source": meta.get("source", "未知")
+            })
         
-        # 重排序：用 LLM 选最相关的 2 段
-        rerank_prompt = f"用户问题：{query}\n\n候选片段：\n"
+        # 第二步：用 LLM 重排序，选出最相关的 2 段
+        rerank_prompt = f"""用户的问题是："{query}"
+
+以下是知识库检索到的 {len(candidates)} 个候选片段：
+
+"""
         for i, c in enumerate(candidates, 1):
-            rerank_prompt += f"片段{i}：{c['doc'][:300]}\n\n"
-        rerank_prompt += "请选出最能回答用户问题的 2 个片段编号，格式如：1,3"
+            rerank_prompt += f"片段{i}（来源：{c['source']}）：\n{c['doc'][:500]}\n\n"
         
-        rerank_llm = ChatOpenAI(model="deepseek-chat", api_key=api_key, base_url="https://api.deepseek.com/v1", temperature=0)
+        rerank_prompt += f"""请从以上片段中，选出最能回答用户问题的 2 个片段。
+只返回片段编号，格式如：1,3 或 2,5。不要返回其他内容。"""
+        
+        rerank_llm = ChatOpenAI(
+            model="deepseek-chat",
+            api_key=api_key,
+            base_url="https://api.deepseek.com/v1",
+            temperature=0  # 重排序要确定性
+        )
+        
         rerank_response = rerank_llm.invoke(rerank_prompt)
+        chosen_indices = rerank_response.content.strip()
         
+        # 解析返回的编号
         import re
         chosen = []
-        for match in re.findall(r'\d+', rerank_response.content):
+        for match in re.findall(r'\d+', chosen_indices):
             idx = int(match)
             if 1 <= idx <= len(candidates) and idx not in chosen:
                 chosen.append(idx)
+        
+        # 如果解析失败，就用第一个候选
         if not chosen:
             chosen = [1]
         
+        # 第三步：返回重排序后选中的片段
         out = "知识库检索结果（重排序后）：\n"
         for idx in chosen[:2]:
             c = candidates[idx - 1]
             out += f"--- 来源：{c['source']} ---\n{c['doc']}\n"
+        
         return out
+        
     except Exception as e:
         return f"检索失败：{str(e)}"
 
 @tool
 def read_document_file(filename: str) -> str:
-    """读取PDF或Word文档，自动分段存入知识库。支持.pdf和.docx。"""
+    """读取PDF或Word文档，自动分段存入知识库。支持.pdf和.docx。读取后内容可供后续 query_knowledge 检索。"""
     try:
         text = ""
         if filename.lower().endswith(".pdf"):
@@ -202,19 +234,27 @@ def read_document_file(filename: str) -> str:
         if not text.strip():
             return "文档没有可提取的文字"
 
-        # 智能分段
+        # ========== 新的分段逻辑 ==========
         def split_text_smart(text, max_chunk=800, min_chunk=200):
+            """按段落和句子智能分段，每个块尽量完整"""
+            # 第一步：按换行符拆成段落
             paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+            
             chunks = []
             current_chunk = ""
+            
             for para in paragraphs:
+                # 如果当前块加上这个段落还没超过限制，就继续累积
                 if len(current_chunk) + len(para) <= max_chunk:
                     current_chunk += para + "\n"
                 else:
+                    # 当前块已经够长了，先保存
                     if len(current_chunk) >= min_chunk:
                         chunks.append(current_chunk.strip())
                         current_chunk = para + "\n"
                     else:
+                        # 当前块太短，但加上这个段落又超了，需要拆分段落
+                        # 把当前块和这个段落合并，然后按句号拆分
                         combined = current_chunk + para
                         sentences = combined.replace("。", "。\n").replace("！", "！\n").replace("？", "？\n").split("\n")
                         temp = ""
@@ -228,28 +268,41 @@ def read_document_file(filename: str) -> str:
                         if temp.strip():
                             chunks.append(temp.strip())
                         current_chunk = ""
+            
+            # 处理最后剩余的块
             if current_chunk.strip():
                 if len(current_chunk) >= min_chunk:
                     chunks.append(current_chunk.strip())
-                elif chunks:
-                    chunks[-1] = chunks[-1] + "\n" + current_chunk.strip()
                 else:
-                    chunks.append(current_chunk.strip())
+                    # 如果最后一块太短，合并到前一块
+                    if chunks:
+                        chunks[-1] = chunks[-1] + "\n" + current_chunk.strip()
+                    else:
+                        chunks.append(current_chunk.strip())
+            
+            # 过滤太短的块
             return [c for c in chunks if len(c) >= 50]
 
         chunks = split_text_smart(text)
+        
         if not chunks:
+            # 如果智能分段没分出来，回退到固定字数
             chunks = [text[i:i+800] for i in range(0, len(text), 800)]
 
-        embeddings = get_embedding_model().encode(chunks).tolist()
-        doc_ids = [f"doc_{int(time.time() * 1000)}_{i}" for i in range(len(chunks))]
-        collection.add(
-            ids=doc_ids,
-            embeddings=embeddings,
-            documents=chunks,
-            metadatas=[{"source": filename} for _ in chunks]
-        )
-        return f"已读取 {filename}，分段为 {len(chunks)} 段存入知识库。"
+        # 每段分别存进知识库
+        try:
+            embeddings = get_embedding_model().encode(chunks).tolist()
+            doc_ids = [f"doc_{int(time.time() * 1000)}_{i}" for i in range(len(chunks))]
+            collection.add(
+                ids=doc_ids,
+                embeddings=embeddings,
+                documents=chunks,
+                metadatas=[{"source": filename} for _ in chunks]
+            )
+            return f"已读取 {filename}，智能分段为 {len(chunks)} 段存入知识库。你现在可以问我关于这个文档的任何问题。"
+        except Exception as e:
+            return f"读取成功但存入知识库失败：{str(e)}"
+
     except FileNotFoundError:
         return f"文件 {filename} 不存在"
     except Exception as e:
@@ -258,44 +311,6 @@ def read_document_file(filename: str) -> str:
 tools = [read_file, list_files, write_file, get_weather, add_document, query_knowledge, read_document_file]
 tool_map = {t.name: t for t in tools}
 llm_with_tools = llm.bind_tools(tools)
-
-# ========== LangGraph 状态 ==========
-class AgentState(TypedDict):
-    messages: Annotated[list, operator.add]
-
-def call_model(state):
-    messages = state["messages"]
-    response = llm_with_tools.invoke(messages)
-    return {"messages": [response]}
-
-def call_tools(state):
-    messages = state["messages"]
-    last_message = messages[-1]
-    results = []
-    for tc in last_message.tool_calls:
-        name = tc["name"]
-        args = tc["args"]
-        try:
-            result = tool_map[name].invoke(args)
-        except Exception as e:
-            result = f"工具执行错误：{str(e)}"
-        results.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-    return {"messages": results}
-
-def should_continue(state):
-    messages = state["messages"]
-    last_message = messages[-1]
-    if last_message.tool_calls:
-        return "tools"
-    return END
-
-graph = StateGraph(AgentState)
-graph.add_node("agent", call_model)
-graph.add_node("tools", call_tools)
-graph.set_entry_point("agent")
-graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-graph.add_edge("tools", "agent")
-agent_graph = graph.compile()
 
 @app.get("/memories")
 async def get_memories():
@@ -309,52 +324,57 @@ async def chat(request: Request):
     async def generate():
         memories = load_memory()
         messages = []
-        
-        rules = """你是文件管家Agent。规则：
-1. 当工具返回了足够信息时，直接基于那些信息回答用户。
-2. 当知识库返回了用户需要的内容时，完整展示内容，不要只说'在上面'。
-3. 绝不要主动调用 write_file，除非用户明确说"保存"、"写文件"。"""
-        
+        rules = """你是文件管家Agent。严格遵守以下规则：
+                1. 当 query_knowledge 工具返回了内容，直接把这些内容展示给用户，绝不要调用 write_file，绝不要说"帮你保存成备忘录"。
+                2. 你只需要回答问题，不需要主动保存任何文件，除非用户明确说"保存"、"写文件"。
+                3. 不要承诺之后再做，现在就做。"""
+
         if memories:
             mem_text = "【长期记忆】以下是历史对话摘要：\n"
             for m in memories:
                 mem_text += f"- 用户：{m['user']}\n- Agent：{m['agent_summary']}\n"
             rules += "\n\n" + mem_text + "\n当用户问'之前'、'上次'等问题时，优先引用以上记忆。"
-        
+
         messages.append(SystemMessage(content=rules))
         messages.append(HumanMessage(content=user_message))
-        
+
         total_tokens = 0
         agent_response = ""
-        step_count = 0
-        
-        try:
-            result = agent_graph.invoke({"messages": messages})
-            
-            for msg in result["messages"]:
-                if isinstance(msg, AIMessage) and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        step_count += 1
-                        yield f"data: {json.dumps({'type': 'tool_call', 'name': tc['name'], 'args': tc['args']}, ensure_ascii=False)}\n\n"
-                        await asyncio.sleep(0.1)
-                elif isinstance(msg, ToolMessage):
-                    yield f"data: {json.dumps({'type': 'tool_result', 'content': msg.content}, ensure_ascii=False)}\n\n"
+
+        for step in range(10):
+            response = llm_with_tools.invoke(messages)
+
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                total_tokens += response.usage_metadata.get("total_tokens", 0)
+
+            if response.tool_calls:
+                messages.append(response)
+                for tc in response.tool_calls:
+                    name = tc["name"]
+                    args = tc["args"]
+                    yield f"data: {json.dumps({'type': 'tool_call', 'name': name, 'args': args}, ensure_ascii=False)}\n\n"
                     await asyncio.sleep(0.1)
-            
-            final_message = result["messages"][-1]
-            final_content = final_message.content if isinstance(final_message.content, str) else str(final_message.content)
-            
-            stream = llm.stream([SystemMessage(content=rules), HumanMessage(content=user_message), AIMessage(content=final_content)])
-            for chunk in stream:
-                if chunk.content:
-                    yield f"data: {json.dumps({'type': 'stream', 'content': chunk.content}, ensure_ascii=False)}\n\n"
-                    agent_response += chunk.content
-                    await asyncio.sleep(0.02)
-            
-            yield f"data: {json.dumps({'type': 'done', 'steps': step_count, 'tokens': total_tokens}, ensure_ascii=False)}\n\n"
-            add_memory(user_message, agent_response)
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+                    try:
+                        result = tool_map[name].invoke(args)
+                    except Exception as e:
+                        result = f"工具执行错误：{str(e)}"
+                    yield f"data: {json.dumps({'type': 'tool_result', 'content': result}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.1)
+                    messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+            else:
+                final = response.content if isinstance(response.content, str) else str(response.content)
+                messages.append(AIMessage(content=final))
+                stream = llm.stream(messages)
+                for chunk in stream:
+                    if chunk.content:
+                        yield f"data: {json.dumps({'type': 'stream', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        agent_response += chunk.content
+                        await asyncio.sleep(0.02)
+                yield f"data: {json.dumps({'type': 'done', 'steps': step+1, 'tokens': total_tokens}, ensure_ascii=False)}\n\n"
+                add_memory(user_message, agent_response)
+                return
+
+        yield f"data: {json.dumps({'type': 'error', 'content': '达到最大步数'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
