@@ -23,9 +23,18 @@ app.add_middleware(
 )
 
 # ========== 初始化 LLM ==========
+api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+print(f"DEBUG: API Key 长度 = {len(api_key)}")  # 打印长度，不打印 Key 本身
+if not api_key:
+    # 如果环境变量没有，尝试从 .env 读
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    print(f"DEBUG: 从 .env 读取后，API Key 长度 = {len(api_key)}")
+
 llm = ChatOpenAI(
     model="deepseek-chat",
-    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+    api_key=api_key,
     base_url="https://api.deepseek.com/v1",
 )
 
@@ -139,17 +148,67 @@ def add_document(content: str, source: str = "未标注") -> str:
 
 @tool
 def query_knowledge(query: str) -> str:
-    """从知识库检索相关内容。当用户问'之前存的资料'、'文档里写了什么'时，必须先调这个工具，不要重新读文件。"""
+    """从知识库检索与问题最相关的内容。当用户问'之前存的资料'、'文档里写了什么'时，必须先调这个工具，不要重新读文件。"""
     try:
+        # 第一步：粗检索，返回 5 个候选片段
         q_emb = get_embedding_model().encode(query).tolist()
-        results = collection.query(query_embeddings=[q_emb], n_results=1)
-        if results and results["documents"] and results["documents"][0]:
-            out = "知识库检索结果（最相关的一段）：\n"
-            doc = results["documents"][0][0]
-            meta = results["metadatas"][0][0]
-            out += f"--- 来源：{meta.get('source','未知')} ---\n{doc}\n"
-            return out
-        return "知识库中没有相关的内容。"
+        results = collection.query(
+            query_embeddings=[q_emb],
+            n_results=5  # 先取 5 个候选
+        )
+        
+        if not results or not results["documents"] or not results["documents"][0]:
+            return "知识库中没有相关的内容。"
+        
+        candidates = []
+        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+            candidates.append({
+                "doc": doc,
+                "source": meta.get("source", "未知")
+            })
+        
+        # 第二步：用 LLM 重排序，选出最相关的 2 段
+        rerank_prompt = f"""用户的问题是："{query}"
+
+以下是知识库检索到的 {len(candidates)} 个候选片段：
+
+"""
+        for i, c in enumerate(candidates, 1):
+            rerank_prompt += f"片段{i}（来源：{c['source']}）：\n{c['doc'][:500]}\n\n"
+        
+        rerank_prompt += f"""请从以上片段中，选出最能回答用户问题的 2 个片段。
+只返回片段编号，格式如：1,3 或 2,5。不要返回其他内容。"""
+        
+        rerank_llm = ChatOpenAI(
+            model="deepseek-chat",
+            api_key=api_key,
+            base_url="https://api.deepseek.com/v1",
+            temperature=0  # 重排序要确定性
+        )
+        
+        rerank_response = rerank_llm.invoke(rerank_prompt)
+        chosen_indices = rerank_response.content.strip()
+        
+        # 解析返回的编号
+        import re
+        chosen = []
+        for match in re.findall(r'\d+', chosen_indices):
+            idx = int(match)
+            if 1 <= idx <= len(candidates) and idx not in chosen:
+                chosen.append(idx)
+        
+        # 如果解析失败，就用第一个候选
+        if not chosen:
+            chosen = [1]
+        
+        # 第三步：返回重排序后选中的片段
+        out = "知识库检索结果（重排序后）：\n"
+        for idx in chosen[:2]:
+            c = candidates[idx - 1]
+            out += f"--- 来源：{c['source']} ---\n{c['doc']}\n"
+        
+        return out
+        
     except Exception as e:
         return f"检索失败：{str(e)}"
 
@@ -175,17 +234,60 @@ def read_document_file(filename: str) -> str:
         if not text.strip():
             return "文档没有可提取的文字"
 
-        # 分段：每 800 字一段，有重叠 100 字防止截断上下文
-        chunk_size = 800
-        overlap = 100
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = min(start + chunk_size, len(text))
-            chunks.append(text[start:end])
-            if end == len(text):
-                break
-            start = end - overlap
+        # ========== 新的分段逻辑 ==========
+        def split_text_smart(text, max_chunk=800, min_chunk=200):
+            """按段落和句子智能分段，每个块尽量完整"""
+            # 第一步：按换行符拆成段落
+            paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+            
+            chunks = []
+            current_chunk = ""
+            
+            for para in paragraphs:
+                # 如果当前块加上这个段落还没超过限制，就继续累积
+                if len(current_chunk) + len(para) <= max_chunk:
+                    current_chunk += para + "\n"
+                else:
+                    # 当前块已经够长了，先保存
+                    if len(current_chunk) >= min_chunk:
+                        chunks.append(current_chunk.strip())
+                        current_chunk = para + "\n"
+                    else:
+                        # 当前块太短，但加上这个段落又超了，需要拆分段落
+                        # 把当前块和这个段落合并，然后按句号拆分
+                        combined = current_chunk + para
+                        sentences = combined.replace("。", "。\n").replace("！", "！\n").replace("？", "？\n").split("\n")
+                        temp = ""
+                        for sent in sentences:
+                            if len(temp) + len(sent) <= max_chunk:
+                                temp += sent
+                            else:
+                                if temp.strip():
+                                    chunks.append(temp.strip())
+                                temp = sent
+                        if temp.strip():
+                            chunks.append(temp.strip())
+                        current_chunk = ""
+            
+            # 处理最后剩余的块
+            if current_chunk.strip():
+                if len(current_chunk) >= min_chunk:
+                    chunks.append(current_chunk.strip())
+                else:
+                    # 如果最后一块太短，合并到前一块
+                    if chunks:
+                        chunks[-1] = chunks[-1] + "\n" + current_chunk.strip()
+                    else:
+                        chunks.append(current_chunk.strip())
+            
+            # 过滤太短的块
+            return [c for c in chunks if len(c) >= 50]
+
+        chunks = split_text_smart(text)
+        
+        if not chunks:
+            # 如果智能分段没分出来，回退到固定字数
+            chunks = [text[i:i+800] for i in range(0, len(text), 800)]
 
         # 每段分别存进知识库
         try:
@@ -197,7 +299,7 @@ def read_document_file(filename: str) -> str:
                 documents=chunks,
                 metadatas=[{"source": filename} for _ in chunks]
             )
-            return f"已读取 {filename}，分成 {len(chunks)} 段存入知识库。你现在可以问我关于这个文档的任何问题。"
+            return f"已读取 {filename}，智能分段为 {len(chunks)} 段存入知识库。你现在可以问我关于这个文档的任何问题。"
         except Exception as e:
             return f"读取成功但存入知识库失败：{str(e)}"
 
@@ -222,7 +324,10 @@ async def chat(request: Request):
     async def generate():
         memories = load_memory()
         messages = []
-        rules = "你是文件管家Agent。规则：1. 工具返回足够信息时直接回答，不再调工具。2. 知识库返回内容时完整展示，不要说'在上面'。"
+        rules = """你是文件管家Agent。严格遵守以下规则：
+                1. 当 query_knowledge 工具返回了内容，直接把这些内容展示给用户，绝不要调用 write_file，绝不要说"帮你保存成备忘录"。
+                2. 你只需要回答问题，不需要主动保存任何文件，除非用户明确说"保存"、"写文件"。
+                3. 不要承诺之后再做，现在就做。"""
 
         if memories:
             mem_text = "【长期记忆】以下是历史对话摘要：\n"
