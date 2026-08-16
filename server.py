@@ -63,7 +63,7 @@ def add_memory(user_message, agent_response):
 
 # ========== RAG 知识库 ==========
 import chromadb
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.HttpClient(host="chroma", port=8001)
 try:
     collection = chroma_client.get_collection("agent_knowledge")
 except:
