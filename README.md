@@ -1,19 +1,20 @@
 # AI Agent 文件管家
 
-一个基于 **FastAPI + DeepSeek + RAG** 的全栈 AI Agent，能自主调用工具、操作文件、搜索互联网、查询天气，并拥有三级记忆系统。
+一个基于 **FastAPI + LangGraph + DeepSeek + RAG** 的全栈 AI Agent，支持文件操作、互联网搜索、天气查询、知识库检索，并带有人机协同（HITL）安全机制。
 
-## ✨ 功能特性
+## ✨ 核心功能
 
-- **ReAct 循环**：自主推理 + 工具调用，不是写死的 if-else
-- **6 个工具**：文件读写、目录浏览、互联网搜索、天气查询、知识库存取
+- **ReAct 推理循环**：自主思考、调用工具、观察结果、继续推理
+- **8 个工具**：文件读写、目录浏览、互联网搜索、天气查询、知识库存取、PDF/Word 文档读取
 - **三级记忆系统**：
   - 短期记忆（对话历史）
-  - 长期记忆（JSON 持久化，跨会话记忆）
-  - 知识库（ChromaDB 向量数据库，语义检索）
-- **流式输出**：SSE 实现打字机效果
-- **浏览器自动化**：Playwright 驱动，真实搜索互联网
-- **专业 UI**：侧边栏、折叠思考过程、记忆面板、移动端适配
-- **云部署**：Railway 一键部署，公网可访问
+  - 长期记忆（JSON 持久化）
+  - 知识库（ChromaDB 向量数据库 + 语义检索）
+- **RAG 进阶**：文档智能分段、重排序
+- **流式输出**：SSE 打字机效果
+- **人机协同（HITL）**：关键操作前暂停确认
+- **安全防护**：Prompt Injection 双层防御
+- **云部署**：Docker 容器化 + 腾讯云服务器
 
 ## 🛠 技术栈
 
@@ -21,65 +22,72 @@
 |---|---|
 | 前端 | HTML5 / CSS3 / JavaScript / SSE |
 | 后端 | Python / FastAPI / Uvicorn |
-| AI | DeepSeek API / Function Calling / ReAct |
-| 记忆 | JSON / ChromaDB / Sentence Transformers |
-| 浏览器 | Playwright |
-| 部署 | Railway / Git |
-
-## 🏗 架构
-
-用户输入 → FastAPI 后端 → Agent 核心循环（ReAct） → 工具系统 → 流式输出 → 前端 UI
+| AI 框架 | LangChain / LangGraph |
+| 大模型 | DeepSeek API |
+| 向量数据库 | ChromaDB |
+| 文档解析 | pypdf / python-docx |
+| 部署 | Docker / Railway / 腾讯云 |
 
 ## 🚀 快速开始
 
-### 1. 克隆仓库
+### 本地运行
 
-`git clone https://github.com/16638123226/ai-agent-file-manager.git`
+```bash
+git clone https://github.com/16638123226/ai-agent-file-manager.git
+cd ai-agent-file-manager
+pip install -r requirements.txt
+```
 
-### 2. 安装依赖
+创建 `.env` 文件：
 
-`pip install -r requirements.txt`
+```
+DEEPSEEK_API_KEY=你的Key
+HF_ENDPOINT=https://hf-mirror.com
+```
 
-`playwright install chromium`
+启动：
 
-### 3. 配置环境变量
-
-创建 `.env` 文件，内容为：
-
-`DEEPSEEK_API_KEY=你的Key`
-
-`HF_ENDPOINT=https://hf-mirror.com`
-
-### 4. 启动
-
-`python server.py`
+```bash
+python server.py
+```
 
 浏览器打开 `http://localhost:8000`
 
+### Docker 运行
+
+```bash
+docker build -t agent .
+docker run -p 8000:8000 --env DEEPSEEK_API_KEY=你的Key --env HF_ENDPOINT=https://hf-mirror.com agent
+```
+
 ## 🌐 在线演示
 
-https://selfless-nurturing-production-68fa.up.railway.app
+- http://124.222.59.215
+- http://shibaobao.chat （备案中）
 
 ## 📝 使用示例
 
-- "帮我看看目录里有什么文件"
+- "看看目录里有什么文件"
 - "读一下 a.txt"
-- "帮我创建一个 b.txt，内容是：你好"
-- "用搜索工具查一下：北京今天天气"
-- "帮我记住：我喜欢喝美式咖啡。来源：用户偏好"
+- "帮我创建 b.txt，内容是：你好"
+- "搜索：北京天气"
+- "帮我记住：我喜欢美式咖啡。来源：用户偏好"
 - "我之前说过我喜欢喝什么？"
+- "读一下红警运行教程V6.pdf"
+- "红警卡菜单怎么解决？"
 
-## 🔒 安全说明
+## 🔒 安全机制
 
-- API Key 通过环境变量管理，不硬编码
-- 文件操作限制在当前目录
-- 敏感文件通过 `.gitignore` 排除
+- Prompt Injection 防御：System Prompt 规则 + 输入过滤
+- 人机协同：写文件等操作需用户确认
+- 危险词拦截：删除类操作直接拒绝
+- API Key 管理：环境变量，不硬编码
 
 ## 📈 待优化
 
-- [ ] 支持 PDF/Word 文档解析
 - [ ] 多会话持久化
-- [ ] 多 Agent 协作
+- [ ] 多 Agent 协作集成
+- [ ] 支持更多文档格式
 - [ ] 用户认证
 
 ## 👤 作者
