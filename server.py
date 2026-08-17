@@ -63,7 +63,7 @@ def add_memory(user_message, agent_response):
 
 # ========== RAG 知识库 ==========
 import chromadb
-chroma_client = chromadb.HttpClient(host="chroma", port=8001)
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
 try:
     collection = chroma_client.get_collection("agent_knowledge")
 except:
@@ -272,14 +272,28 @@ def call_tools(state):
     messages = state["messages"]
     last_message = messages[-1]
     results = []
+    
     for tc in last_message.tool_calls:
         name = tc["name"]
         args = tc["args"]
+        
+        # 如果用户上一条消息是"确认"，则放行
+        user_messages = [m for m in messages if isinstance(m, HumanMessage)]
+        last_user_msg = user_messages[-1].content.strip() if user_messages else ""
+        
+        if name == "write_file" and last_user_msg not in ["确认", "确认写入", "是", "yes", "Y"]:
+            results.append(ToolMessage(
+                content=f"⚠️ 即将写入文件 {args.get('filename')}。请回复'确认'来执行，或回复'取消'来放弃。",
+                tool_call_id=tc["id"]
+            ))
+            continue
+        
         try:
             result = tool_map[name].invoke(args)
         except Exception as e:
             result = f"工具执行错误：{str(e)}"
         results.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+    
     return {"messages": results}
 
 def should_continue(state):
