@@ -2,4 +2,6 @@
 __pycache__/
 *.pyc
 chroma_db/
+chroma_data/
 memory.json
+*.png
